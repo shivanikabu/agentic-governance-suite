@@ -1,0 +1,438 @@
+"""
+Automated Code Review & Analysis Tool
+=====================================
+A Streamlit-based tool that analyzes GitHub repositories using Repomix and LLM.
+Provides comprehensive code reviews covering:
+- Architecture analysis
+- Security vulnerabilities
+- Performance optimization
+- Dependency management
+- Code quality assessment
+- Technical specification validation
+
+Features:
+- GitHub repository integration via Repomix
+- Multi-perspective code analysis
+- LLM-powered insights using Azure OpenAI
+- Technical specification compliance checking
+- Analysis history tracking
+
+Author: [Shivani Kabu & Nikhil Khandelwal]
+Date: [01/12/2025]
+Version: 1.0
+"""
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
+import streamlit as st
+import subprocess
+import re
+import os
+from dotenv import load_dotenv
+from Auditor.system_messages import agent_system_messages
+
+# LangChain imports for LLM integration
+from langchain_openai import AzureChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+
+# ============================================================================
+# ENVIRONMENT CONFIGURATION
+# ============================================================================
+# Load environment variables from .env file
+load_dotenv()
+
+# Set Azure OpenAI environment variables
+os.environ['AZURE_OPENAI_API_KEY'] = os.getenv("AZURE_OPENAI_API_KEY")
+os.environ['AZURE_OPENAI_ENDPOINT'] = os.getenv("AZURE_OPENAI_ENDPOINT")
+os.environ['OPENAI_API_VERSION'] = os.getenv("AZURE_OPENAI_API_VERSION")
+
+
+# ============================================================================
+# TECHNICAL SPECIFICATION LOADING
+# ============================================================================
+# Load technical specifications if available
+# These are used to validate code against requirements
+try:
+    # Load original technical specifications input
+    with open(f"data/technical_specification_input.txt", "r", encoding="utf-8") as f:
+        technical_specifications_input = f.read()
+    
+    # Load analysis/review of technical specifications
+    with open("data/technical_specification_analysis.txt", "r", encoding="utf-8") as f:
+        technical_specifications_analysis = f.read()
+
+except FileNotFoundError:
+    # If files don't exist, proceed without spec validation
+    technical_specifications_input = ""
+    technical_specifications_analysis = ""
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def is_valid_github_url(url):
+    """
+    Validate GitHub repository URL format.
+    
+    Args:
+        url (str): GitHub repository URL to validate
+        
+    Returns:
+        bool: True if URL matches GitHub repository pattern, False otherwise
+        
+    Example:
+        Valid: https://github.com/username/repository
+        Valid: http://github.com/username/repository/
+        Invalid: github.com/username/repository (missing protocol)
+    """
+    pattern = r'^https?://github\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+(/)?$'
+    return re.match(pattern, url) is not None
+
+
+def run_repomix(github_url):
+    """
+    Execute Repomix CLI to convert GitHub repository into XML format.
+    
+    Args:
+        github_url (str): Valid GitHub repository URL
+        
+    Returns:
+        tuple: (success: bool, message: str)
+            - success: True if Repomix executed successfully
+            - message: stdout on success, error message on failure
+            
+    Note:
+        - Repomix CLI path is configured for Linux environment
+        - Generates repomix-output.xml in current directory
+        - Requires Node.js to be installed
+        
+    Repomix Output:
+        Creates an XML file containing the entire codebase structure
+        with file contents, making it suitable for LLM analysis
+    """
+    try:
+        # Repomix CLI path (adjust based on your system)
+        # Windows example: r"C:\Users\Username\AppData\Roaming\npm\node_modules\repomix\bin\repomix.cjs"
+        repomix_cli = r"/home/ubuntu/.nvm/versions/node/v22.16.0/bin/repomix"
+        # Execute Repomix with remote GitHub repository
+        result = subprocess.run([
+            "node",
+            repomix_cli,
+            "--remote", github_url,
+        ], check=True, capture_output=True, text=True)
+        
+        return True, result.stdout
+        
+    except subprocess.CalledProcessError as e:
+        # Repomix execution failed
+        return False, f"Error executing repomix: {e.stderr}"
+    
+    except FileNotFoundError:
+        # Node.js or Repomix not found
+        return False, "Error: 'repomix' command not found."
+
+
+def read_xml_file(file_path):
+    """
+    Read XML file content generated by Repomix.
+    
+    Args:
+        file_path (str): Path to the XML file
+        
+    Returns:
+        str or None: XML content if file exists, None otherwise
+    """
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    else:
+        return None
+
+
+# ============================================================================
+# PROMPT GENERATION
+# ============================================================================
+
+def get_prompt(task_type, technical_specifications_input, technical_specifications_analysis):
+    """
+    Generate LLM prompt template based on selected analysis task.
+    
+    Args:
+        task_type (str): Type of analysis to perform
+            - "Code Review": Comprehensive code analysis
+            - "Test Coverage": Testing analysis
+            - "Documentation Generation": Generate documentation
+        technical_specifications_input (str): Original technical specs
+        technical_specifications_analysis (str): Analysis of tech specs
+        
+    Returns:
+        ChatPromptTemplate: Configured prompt template for the task
+        
+    Raises:
+        ValueError: If task_type is not recognized
+    """
+    
+    # ========================================
+    # CODE REVIEW PROMPTS
+    # ========================================
+    if task_type == "Code Review":
+        # Code Review WITH technical specifications
+        if technical_specifications_input and technical_specifications_analysis:
+            return ChatPromptTemplate.from_template("""
+You are a code reviewer. You will be given the project codebase in XML format, technical specifications and its review.
+Generate a brief overview of the codebase's functionality and workflow.
+
+Your task is to analyze the file and provide:
+
+1. Architecture Review:
+   Analyze this codebase's architecture:
+   - Evaluate the overall structure and patterns
+   - Identify potential architectural issues
+   - Suggest improvements for scalability
+   - Note areas that follow best practices
+   Focus on maintainability and modularity.
+
+2. Security Review:
+   Perform a security review of this codebase:
+   - Identify potential security vulnerabilities
+   - Check for common security anti-patterns
+   - Review error handling and input validation
+   - Assess dependency security
+   Provide specific examples and remediation steps.
+
+3. Performance Review:
+   Review the codebase for performance:
+   - Identify performance bottlenecks
+   - Check resource utilization
+   - Review algorithmic efficiency
+   - Assess caching strategies
+   Include specific optimization recommendations.
+
+4. Dependency Analysis:
+   Analyze the project dependencies:
+   - Identify outdated packages
+   - Check for security vulnerabilities
+   - Suggest alternative packages
+   - Review dependency usage patterns
+   Include specific upgrade recommendations.
+
+5. Code Quality:
+   Assess code quality and suggest improvements:
+   - Review naming conventions
+   - Check code organization
+   - Evaluate error handling
+   - Review commenting practices
+   Provide specific examples of good and problematic patterns.
+
+6. Technical Specifications Compliance:
+   Check the technical specifications met by the codebase in detail:
+   - Verify if the code meets the functional requirements
+   - Check if the code adheres to the design decisions
+   - Ensure the code aligns with the architecture documentation
+   - Validate the code against the testing strategy
+
+Note: Ensure all your explanations are detailed and include specific file references to support your analysis. This helps in pinpointing exact locations in the codebase for review, remediation, or improvement.
+
+Here is the XML file:
+{xml_content}
+
+Technical Specifications:
+{technical_specifications_input}
+
+Technical Specifications Review:
+{technical_specifications_analysis}
+""")
+        
+        # Code Review WITHOUT technical specifications
+        else:
+            return ChatPromptTemplate.from_template("""
+You are a code reviewer. You will be given the project codebase in XML format.
+Generate a brief overview of the codebase's functionality and workflow.
+
+Your task is to analyze the file and provide:
+
+1. Architecture Review:
+   Analyze this codebase's architecture:
+   - Evaluate the overall structure and patterns
+   - Identify potential architectural issues
+   - Suggest improvements for scalability
+   - Note areas that follow best practices
+   Focus on maintainability and modularity.
+
+2. Security Review:
+   Perform a security review of this codebase:
+   - Identify potential security vulnerabilities
+   - Check for common security anti-patterns
+   - Review error handling and input validation
+   - Assess dependency security
+   Provide specific examples and remediation steps.
+
+3. Performance Review:
+   Review the codebase for performance:
+   - Identify performance bottlenecks
+   - Check resource utilization
+   - Review algorithmic efficiency
+   - Assess caching strategies
+   Include specific optimization recommendations.
+
+4. Dependency Analysis:
+   Analyze the project dependencies:
+   - Identify outdated packages
+   - Check for security vulnerabilities
+   - Suggest alternative packages
+   - Review dependency usage patterns
+   Include specific upgrade recommendations.
+
+5. Code Quality:
+   Assess code quality and suggest improvements:
+   - Review naming conventions
+   - Check code organization
+   - Evaluate error handling
+   - Review commenting practices
+   Provide specific examples of good and problematic patterns.
+
+Note: Ensure all your explanations are detailed and include specific file references to support your analysis. This helps in pinpointing exact locations in the codebase for review, remediation, or improvement.
+
+Here is the XML file:
+{xml_content}
+""")
+    
+    # ========================================
+    # TEST COVERAGE PROMPT
+    # ========================================
+    elif task_type == "Test Coverage":
+        return ChatPromptTemplate.from_template(agent_system_messages['test_coverage_agent_sys'])
+    
+    # ========================================
+    # DOCUMENTATION GENERATION PROMPT
+    # ========================================
+    elif task_type == "Documentation Generation":
+        return ChatPromptTemplate.from_template(agent_system_messages['documentation_agent_sys'])
+    
+    else:
+        raise ValueError(f"Unknown task type: {task_type}")
+
+
+# ============================================================================
+# LLM ANALYSIS
+# ============================================================================
+
+def analyze_with_llm(xml_content, task_type):
+    """
+    Analyze codebase XML using Azure OpenAI LLM.
+    
+    Args:
+        xml_content (str): XML representation of the codebase from Repomix
+        task_type (str): Type of analysis to perform
+        
+    Returns:
+        str: LLM analysis results
+        
+    Process:
+        1. Get appropriate prompt template for task type
+        2. Initialize Azure OpenAI chat model (GPT-4o)
+        3. Create LangChain chain (prompt | LLM)
+        4. Invoke chain with XML content and technical specs
+        5. Return analysis content
+    """
+    # Get task-specific prompt template
+    prompt = get_prompt(
+        task_type, 
+        technical_specifications_input, 
+        technical_specifications_analysis
+    )
+    
+    # Initialize Azure OpenAI model (GPT-4o for advanced reasoning)
+    llm = AzureChatOpenAI(model="gpt-4o")
+    
+    # Create LangChain processing chain
+    chain = prompt | llm
+
+    # Invoke LLM analysis with all available context
+    response = chain.invoke({
+        "xml_content": xml_content,
+        "technical_specifications_input": technical_specifications_input,
+        "technical_specifications_analysis": technical_specifications_analysis
+    })
+    
+    return response.content
+
+
+# ============================================================================
+# STREAMLIT UI
+# ============================================================================
+
+# Set default task type (can be made configurable)
+task_type = "Code Review"
+
+# ========================================
+# PAGE HEADER
+# ========================================
+st.title(f"{task_type} Tool")
+st.write(
+    f"Enter a GitHub repository URL to analyze the codebase for **{task_type.lower()}**."
+)
+
+# ========================================
+# INPUT SECTION
+# ========================================
+github_url = st.text_input(
+    "GitHub Repository URL", 
+    placeholder="https://github.com/username/repository"
+)
+
+# ========================================
+# ANALYSIS EXECUTION
+# ========================================
+if st.button(f"Run {task_type}"):
+    # Validate input
+    if not github_url:
+        st.error("GitHub URL is required.")
+    elif not is_valid_github_url(github_url):
+        st.error("Please enter a valid GitHub URL (e.g., https://github.com/username/repository).")
+    else:
+        # Step 1: Run Repomix to generate XML
+        with st.spinner("Running Repomix analysis..."):
+            success, output = run_repomix(github_url)
+
+        if success:
+            st.success(f"{task_type} XML generated successfully!")
+
+            # Step 2: Read generated XML file
+            xml_path = "repomix-output.xml"
+            xml_content = read_xml_file(xml_path)
+
+            if xml_content:
+                # Step 3: Analyze with LLM
+                with st.spinner("Analyzing codebase with LLM..."):
+                    analysis = analyze_with_llm(xml_content, task_type)
+                
+                # Step 4: Display results
+                st.markdown(f"### {task_type} Analysis")
+                st.markdown(analysis)
+            else:
+                st.warning("repomix-output.xml file not found.")
+        else:
+            # Display error from Repomix execution
+            st.error(output)
+
+# ========================================
+# HISTORY TRACKER
+# ========================================
+# Initialize history in session state
+if 'history' not in st.session_state:
+    st.session_state.history = []
+
+# Add current URL to history (avoid duplicates)
+if github_url and (not st.session_state.history or github_url != st.session_state.history[-1]):
+    st.session_state.history.append(github_url)
+
+# Display history in expandable section
+if st.session_state.history:
+    with st.expander("Previous URLs"):
+        # Display in reverse chronological order (most recent first)
+        for url in reversed(st.session_state.history):
+            st.write(url)
